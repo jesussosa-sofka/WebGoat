@@ -22,6 +22,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
@@ -127,6 +129,39 @@ class FileServerTest {
     mockMvc
         .perform(get("/files").principal(AUTHENTICATION))
         .andExpect(model().attributeDoesNotExist("uploadSuccess", "uploadFailed"));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"../evil.txt", "../../evil.txt", "..\\evil.txt", "sub/../../evil.txt"})
+  @DisplayName("An upload whose file name points outside the user directory is not stored there")
+  void shouldNotStoreFileOutsideUserDirectory(String fileName) throws Exception {
+    var upload =
+        new MockMultipartFile(
+            "file", fileName, "text/plain", "evil".getBytes(StandardCharsets.UTF_8));
+
+    mockMvc
+        .perform(multipart("/fileupload").file(upload).principal(AUTHENTICATION))
+        .andExpect(status().is3xxRedirection());
+
+    // nothing may be written outside the directory of the user
+    Assertions.assertThat(uploadedFiles())
+        .allSatisfy(file -> Assertions.assertThat(file).startsWith(userDirectory()));
+    Assertions.assertThat(fileServerLocation.resolve("evil.txt")).doesNotExist();
+    Assertions.assertThat(fileServerLocation.getParent().resolve("evil.txt")).doesNotExist();
+  }
+
+  @Test
+  @DisplayName("An upload with a parent directory reference is rejected")
+  void shouldRejectParentDirectoryFileName() throws Exception {
+    var upload =
+        new MockMultipartFile(
+            "file", "../evil.txt", "text/plain", "evil".getBytes(StandardCharsets.UTF_8));
+
+    mockMvc
+        .perform(multipart("/fileupload").file(upload).principal(AUTHENTICATION))
+        .andExpect(redirectedUrl("files?uploadSuccess=Invalid+file+name"));
+
+    Assertions.assertThat(uploadedFiles()).isEmpty();
   }
 
   private Path userDirectory() {

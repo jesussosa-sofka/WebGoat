@@ -12,6 +12,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -47,6 +49,7 @@ public class FileServer {
 
   static final String NOTHING_TO_UPLOAD = "Nothing to upload";
   static final String UPLOAD_TOO_LARGE = "File is too large to upload";
+  static final String INVALID_FILE_NAME = "Invalid file name";
 
   @Value("${webwolf.fileserver.location}")
   private String fileLocation;
@@ -83,16 +86,23 @@ public class FileServer {
           new ModelMap().addAttribute("uploadSuccess", NOTHING_TO_UPLOAD));
     }
 
-    var destinationDir = new File(fileLocation, username);
-    destinationDir.mkdirs();
+    var destinationDir = Path.of(fileLocation, username).toAbsolutePath().normalize();
+    var destinationFile = resolveInside(destinationDir, multipartFile.getOriginalFilename());
+    if (destinationFile == null) {
+      log.warn("Rejected upload with invalid file name from {}", username);
+      return new ModelAndView(
+          new RedirectView("files", true),
+          new ModelMap().addAttribute("uploadSuccess", INVALID_FILE_NAME));
+    }
+
+    Files.createDirectories(destinationDir);
     // DO NOT use multipartFile.transferTo(), see
     // https://stackoverflow.com/questions/60336929/java-nio-file-nosuchfileexception-when-file-transferto-is-called
     try (InputStream is = multipartFile.getInputStream()) {
-      var destinationFile = destinationDir.toPath().resolve(multipartFile.getOriginalFilename());
       Files.deleteIfExists(destinationFile);
       Files.copy(is, destinationFile);
     }
-    log.debug("File saved to {}", new File(destinationDir, multipartFile.getOriginalFilename()));
+    log.debug("File saved to {}", destinationFile);
 
     return new ModelAndView(
         new RedirectView("files", true),
@@ -133,6 +143,19 @@ public class FileServer {
         uploadedFiles.stream().sorted(comparing(UploadedFile::creationTime).reversed()).toList());
     modelAndView.addObject("webwolf_url", "http://" + server + ":" + port + contextPath);
     return modelAndView;
+  }
+
+  /**
+   * Resolves the client supplied file name inside the user's directory. Returns {@code null} when
+   * the name contains path elements (like {@code ../}) that would place the file anywhere else.
+   */
+  private static Path resolveInside(Path directory, String fileName) {
+    try {
+      var resolved = directory.resolve(fileName).normalize();
+      return directory.equals(resolved.getParent()) ? resolved : null;
+    } catch (InvalidPathException e) {
+      return null;
+    }
   }
 
   private String getCreationTime(TimeZone timezone, File file) {
